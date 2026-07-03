@@ -1,0 +1,73 @@
+# ============================================================================
+# The whole system in one command:  docker compose up --build
+#
+#   postgres   - Order Service's database
+#   rabbitmq   - the message broker (+ management UI on :15672, guest/guest)
+#   order-service     - REST API           -> http://localhost:5001/swagger
+#   inventory-service - event-driven worker -> http://localhost:5002/stock
+#
+# depends_on + condition: service_healthy means the .NET services only start
+# AFTER Postgres and RabbitMQ report healthy — no crash-loop on cold start.
+# ============================================================================
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: orderflow
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d orderflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    ports:
+      - "5672:5672"    # AMQP (the services talk here)
+      - "15672:15672"  # management UI (you look here)
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 5s
+      timeout: 10s
+      retries: 10
+
+  order-service:
+    build:
+      context: .   # repo root so the Dockerfile can see all referenced projects
+      dockerfile: src/OrderService/OrderService.Api/Dockerfile
+    ports:
+      - "5001:8080"
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      # Double underscore = ':' in config keys. This OVERRIDES the
+      # localhost values from appsettings.json — inside the compose network
+      # the hosts are the service names, not localhost.
+      ConnectionStrings__OrderDb: "Host=postgres;Port=5432;Database=orderflow;Username=postgres;Password=postgres"
+      RabbitMq__Host: rabbitmq
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  inventory-service:
+    build:
+      context: .
+      dockerfile: src/InventoryService/InventoryService.Worker/Dockerfile
+    ports:
+      - "5002:8080"
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      RabbitMq__Host: rabbitmq
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+# No healthchecks on the .NET containers themselves: the aspnet base image
+# ships without curl/wget. Both services expose /health for anything that
+# CAN probe them (K8s, a load balancer) — an honest, documented trade-off.

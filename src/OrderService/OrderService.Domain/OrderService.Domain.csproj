@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <!-- WHY no package references at all?
+       The Domain layer is the innermost circle of Clean Architecture.
+       It must not know about EF Core, ASP.NET, RabbitMQ — nothing.
+       If you can't unit test your business rules with zero infrastructure,
+       your architecture has a leak. This empty csproj IS the point. -->
+</Project>

@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- MediatR = in-process message dispatcher that powers our CQRS.
+         FluentValidation = declarative input validation.
+         Microsoft.EntityFrameworkCore = ONLY for the DbSet<> abstraction in
+         IApplicationDbContext. Purists keep even this out via repositories;
+         we made the pragmatic (and very common) trade-off — great interview
+         discussion, see INTERVIEW_DEFENSE.md. -->
+    <PackageReference Include="MediatR" Version="12.2.0" />
+    <PackageReference Include="FluentValidation.DependencyInjectionExtensions" Version="11.9.0" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore" Version="8.0.4" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\OrderService.Domain\OrderService.Domain.csproj" />
+    <ProjectReference Include="..\..\BuildingBlocks\OrderFlow.Contracts\OrderFlow.Contracts.csproj" />
+  </ItemGroup>
+</Project>
