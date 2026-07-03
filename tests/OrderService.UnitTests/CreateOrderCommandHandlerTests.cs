@@ -25,7 +25,7 @@ public class CreateOrderCommandHandlerTests
         var userId = Guid.NewGuid();
         var command = new CreateOrderCommand(userId, new List<OrderItemInput>
         {
-            new("WMELON-1", "Watermelon", 3, 25.00m)
+            new("APPLE-1", "Apple", 3, 25.00m)
         });
 
         // ---- Act: the one line under test ----
@@ -47,7 +47,7 @@ public class CreateOrderCommandHandlerTests
 
         var command = new CreateOrderCommand(Guid.NewGuid(), new List<OrderItemInput>
         {
-            new("WMELON-1", "Watermelon", 2, 25.00m)
+            new("APPLE-1", "Apple", 2, 25.00m)
         });
 
         var orderId = await handler.Handle(command, CancellationToken.None);
@@ -59,7 +59,7 @@ public class CreateOrderCommandHandlerTests
             Arg.Is<OrderCreated>(e =>
                 e.OrderId == orderId &&
                 e.Lines.Count == 1 &&
-                e.Lines[0].ProductId == "WMELON-1" &&
+                e.Lines[0].ProductId == "APPLE-1" &&
                 e.Lines[0].Quantity == 2),
             Arg.Any<CancellationToken>());
     }
@@ -72,8 +72,8 @@ public class CreateOrderCommandHandlerTests
 
         var command = new CreateOrderCommand(Guid.NewGuid(), new List<OrderItemInput>
         {
-            new("WMELON-1", "Watermelon", 3, 25.00m),   //  75.00
-            new("LANTERN-3", "Lantern", 2, 10.50m)      //  21.00
+            new("APPLE-1", "Apple", 3, 25.00m),         //  75.00
+            new("MANGO-1", "Mango", 2, 10.50m)          //  21.00
         });
 
         var orderId = await handler.Handle(command, CancellationToken.None);

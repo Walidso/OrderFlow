@@ -1,4 +1,4 @@
-# OrderFlow 🍉
+# OrderFlow 🍎
 
 A small but complete **event-driven microservices system** built with .NET 8 — created as a hands-on portfolio project to demonstrate Clean Architecture, CQRS, async messaging, testing, and containerization.
 
@@ -34,17 +34,20 @@ open http://localhost:5001/swagger
 
 That's it — migrations apply automatically on startup.
 
-**Try the full flow in Swagger:**
+**Web UI:** http://localhost:5003 — register/login, place orders with one-click presets (happy path, insufficient stock, poison message, mangled token), watch order status and live stock update in the browser. No curl or Swagger needed.
+
+**Or try the full flow in Swagger:**
 1. `POST /api/v1/auth/register` → copy the `token`
 2. Click **Authorize**, paste the token
-3. `POST /api/v1/orders` with `productId: "WMELON-1"`, quantity 3
+3. `POST /api/v1/orders` with `productId: "APPLE-1"`, quantity 3
 4. `GET /api/v1/orders/{id}` → watch status go `Pending` → `Confirmed`
 5. Peek at stock dropping: http://localhost:5002/stock
 6. RabbitMQ UI: http://localhost:15672 (guest / guest)
 
-**Break it on purpose (the fun part):**
-- Order `LANTERN-3` with quantity 5 → order becomes `Rejected` (only 3 in stock)
-- Order `GLITCH-1` → the Inventory consumer throws, retries 3× (watch its logs), then the message lands in the `inventory-order-created_error` queue — RabbitMQ's equivalent of a dead-letter queue
+**Break it on purpose (the fun part) — via the web UI presets or manually:**
+- Order `MANGO-1` with quantity 5 → order becomes `Rejected` (only 3 in stock)
+- Order `DURIAN-1` → the Inventory consumer throws, retries 3× (watch its logs), then the message lands in the `inventory-order-created_error` queue — RabbitMQ's equivalent of a dead-letter queue
+- Send a request with a mangled token → `401` before any handler runs
 
 ## Run the tests
 
@@ -80,6 +83,7 @@ src/
     OrderService.Api/             # controllers, middleware, Program.cs
   InventoryService/
     InventoryService.Worker/      # MassTransit consumer + in-memory stock
+web/                              # static HTML/CSS/JS UI, served by nginx
 tests/
   OrderService.UnitTests/
   OrderService.IntegrationTests/

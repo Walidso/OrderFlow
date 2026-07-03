@@ -23,6 +23,17 @@ builder.Services.AddInfrastructure(builder.Configuration);
 
 builder.Services.AddControllers();
 
+// ---- CORS: lets the browser-based Web UI (served from a different origin/
+// port) call this API. AllowAnyHeader is required so the Authorization
+// header survives the preflight OPTIONS request. ----
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("WebUi", policy => policy
+        .WithOrigins("http://localhost:5003")
+        .AllowAnyHeader()
+        .AllowAnyMethod());
+});
+
 // ---- API versioning: routes look like /api/v1/orders ----
 // Versioning from day one means v2 can ship later WITHOUT breaking v1
 // clients — much cheaper to add now than to retrofit.
@@ -126,6 +137,8 @@ app.UseMiddleware<GlobalExceptionHandlingMiddleware>();
 
 app.UseSwagger();
 app.UseSwaggerUI(); // portfolio project: Swagger stays on in all environments
+
+app.UseCors("WebUi");
 
 app.UseAuthentication();
 app.UseAuthorization();

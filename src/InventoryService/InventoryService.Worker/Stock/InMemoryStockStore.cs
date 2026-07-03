@@ -4,14 +4,14 @@ namespace InventoryService.Worker.Stock;
 
 public sealed class InMemoryStockStore : IStockStore
 {
-    // Seeded demo inventory. (Yes, watermelons. 🍉)
+    // Seeded demo inventory for the fruit store. 🍎
     private readonly Dictionary<string, int> _stock = new()
     {
-        ["WMELON-1"] = 100,   // plenty in stock — happy path
-        ["TUNNEL-KIT"] = 50,
-        ["LANTERN-3"] = 3,    // scarce — order 4+ to see StockRejected
-        ["GLITCH-1"] = 999    // cursed — the consumer throws on purpose to
-                              // demonstrate retry + the _error queue
+        ["APPLE-1"] = 100,   // plenty in stock — happy path
+        ["BANANA-1"] = 50,
+        ["MANGO-1"] = 3,     // scarce — order 4+ to see StockRejected
+        ["DURIAN-1"] = 999   // the consumer throws on purpose to
+                             // demonstrate retry + the _error queue
     };
 
     // The bus can hand us several messages concurrently, and Dictionary is

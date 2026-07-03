@@ -46,7 +46,18 @@ builder.Services.AddMassTransit(x =>
 
 builder.Services.AddHealthChecks();
 
+// Lets the browser-based Web UI (a different origin/port) poll /stock.
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("WebUi", policy => policy
+        .WithOrigins("http://localhost:5003")
+        .AllowAnyHeader()
+        .AllowAnyMethod());
+});
+
 var app = builder.Build();
+
+app.UseCors("WebUi");
 
 app.MapHealthChecks("/health");
 

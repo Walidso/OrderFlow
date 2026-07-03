@@ -1,7 +1,7 @@
 namespace OrderService.Domain.Entities;
 
 /// <summary>
-/// One line of an order (e.g. "3 x Watermelon at 25.00").
+/// One line of an order (e.g. "3 x Apple at 25.00").
 ///
 /// Notice the pattern used across this Domain layer:
 ///  - `private set` on every property  -> nobody outside can mutate state

@@ -45,7 +45,7 @@ public class OrdersApiTests : IClassFixture<CustomWebApplicationFactory>
         // before ANY handler code runs. This test would catch a forgotten
         // [Authorize] attribute, which no unit test ever could.
         var response = await _client.PostAsJsonAsync("/api/v1/orders",
-            new { items = new[] { new { productId = "WMELON-1", productName = "Watermelon", quantity = 1, unitPrice = 25.0 } } });
+            new { items = new[] { new { productId = "APPLE-1", productName = "Apple", quantity = 1, unitPrice = 25.0 } } });
 
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }
@@ -78,7 +78,7 @@ public class OrdersApiTests : IClassFixture<CustomWebApplicationFactory>
         {
             items = new[]
             {
-                new { productId = "WMELON-1", productName = "Watermelon", quantity = 3, unitPrice = 25.0 }
+                new { productId = "APPLE-1", productName = "Apple", quantity = 3, unitPrice = 25.0 }
             }
         });
 

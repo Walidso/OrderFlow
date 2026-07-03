@@ -5,6 +5,7 @@
 #   rabbitmq   - the message broker (+ management UI on :15672, guest/guest)
 #   order-service     - REST API           -> http://localhost:5001/swagger
 #   inventory-service - event-driven worker -> http://localhost:5002/stock
+#   web               - browser UI for the whole flow -> http://localhost:5003
 #
 # depends_on + condition: service_healthy means the .NET services only start
 # AFTER Postgres and RabbitMQ report healthy — no crash-loop on cold start.
@@ -67,6 +68,15 @@ services:
     depends_on:
       rabbitmq:
         condition: service_healthy
+
+  web:
+    build:
+      context: ./web
+    ports:
+      - "5003:80"
+    depends_on:
+      - order-service
+      - inventory-service
 
 # No healthchecks on the .NET containers themselves: the aspnet base image
 # ships without curl/wget. Both services expose /health for anything that

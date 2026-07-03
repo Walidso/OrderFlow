@@ -52,14 +52,14 @@ public sealed class OrderCreatedConsumer : IConsumer<OrderCreated>
         _logger.LogInformation("Received OrderCreated for order {OrderId}", message.OrderId);
 
         // --- Demo poison message -------------------------------------------
-        // Ordering the product "GLITCH-1" makes this consumer throw so you
+        // Ordering the product "DURIAN-1" makes this consumer throw so you
         // can WATCH the retry pattern happen: check the service logs (3
         // retries) and then the RabbitMQ UI (http://localhost:15672) for the
         // message sitting in inventory-order-created_error.
-        if (message.Lines.Any(l => l.ProductId == "GLITCH-1"))
+        if (message.Lines.Any(l => l.ProductId == "DURIAN-1"))
         {
             throw new InvalidOperationException(
-                "GLITCH-1 ordered — simulated transient failure to demonstrate retry + error queue.");
+                "DURIAN-1 ordered — simulated transient failure to demonstrate retry + error queue.");
         }
         // --------------------------------------------------------------------
 
