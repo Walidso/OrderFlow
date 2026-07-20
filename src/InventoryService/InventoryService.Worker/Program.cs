@@ -1,4 +1,5 @@
 using InventoryService.Worker.Consumers;
+using InventoryService.Worker.Idempotency;
 using InventoryService.Worker.Stock;
 using MassTransit;
 
@@ -12,6 +13,10 @@ var builder = WebApplication.CreateBuilder(args);
 
 // Singleton: ONE stock store for the whole process — it IS our "database".
 builder.Services.AddSingleton<IStockStore, InMemoryStockStore>();
+
+// Singleton for the same reason: the dedupe guard must be shared across
+// every message this process ever consumes, not scoped per-message.
+builder.Services.AddSingleton<IProcessedOrderStore, InMemoryProcessedOrderStore>();
 
 builder.Services.AddMassTransit(x =>
 {

@@ -20,4 +20,7 @@ public sealed class MassTransitEventPublisher : IEventPublisher
     public Task PublishAsync<TEvent>(TEvent @event, CancellationToken cancellationToken = default)
         where TEvent : class
         => _publishEndpoint.Publish(@event, cancellationToken);
+
+    public Task PublishAsync(object @event, Type eventType, CancellationToken cancellationToken = default)
+        => _publishEndpoint.Publish(@event, eventType, cancellationToken);
 }

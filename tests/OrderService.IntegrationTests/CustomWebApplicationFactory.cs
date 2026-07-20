@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions; // built-in RemoveAll<T>
 using OrderService.Infrastructure.Persistence;
@@ -31,6 +32,18 @@ public sealed class CustomWebApplicationFactory : WebApplicationFactory<Program>
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         _connection.Open();
+
+        // The outbox relay polls on a timer (appsettings.json default: every
+        // 2s) — fine for a demo, needlessly slow for a test suite. Shrink it
+        // so OrdersApiTests doesn't need a multi-second wait to observe a
+        // publish.
+        builder.ConfigureAppConfiguration(config =>
+        {
+            config.AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Outbox:PollingIntervalSeconds"] = "1"
+            });
+        });
 
         builder.ConfigureServices(services =>
         {

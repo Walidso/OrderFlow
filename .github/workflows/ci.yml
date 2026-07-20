@@ -1,0 +1,63 @@
+name: CI
+
+# Runs on every push/PR to master. Two jobs, deliberately separate:
+#   test   - the fast signal (~seconds): does the code build and do the unit
+#            + integration tests pass? No Docker involved — the integration
+#            tests swap Postgres/RabbitMQ for SQLite + MassTransit's
+#            in-memory test harness specifically so CI doesn't need them.
+#   docker - the slower signal: do the actual images this project ships
+#            (docker-compose.yml) still build? Catches a broken Dockerfile
+#            even when the .NET build itself is fine.
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Build & test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Restore
+        run: dotnet restore OrderFlow.sln
+
+      - name: Build
+        run: dotnet build OrderFlow.sln --configuration Release --no-restore
+
+      - name: Test
+        # No explicit LogFileName: each of the three test projects would
+        # otherwise write to the same file and silently clobber each
+        # other's results. Left to itself, VSTest names each .trx after its
+        # assembly, so all three survive side by side.
+        run: >
+          dotnet test OrderFlow.sln --configuration Release --no-build
+          --logger trx
+          --results-directory ./TestResults
+
+      - name: Publish test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: ./TestResults
+
+  docker:
+    name: Docker image build
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build order-service, inventory-service, web images
+        run: docker compose build

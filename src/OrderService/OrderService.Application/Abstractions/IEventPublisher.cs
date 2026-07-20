@@ -12,4 +12,11 @@ public interface IEventPublisher
         where TEvent : class;
     // Fun C# detail: "event" is a reserved keyword, so we escape the
     // parameter name with @. Purely cosmetic — the variable is named "event".
+
+    /// <summary>
+    /// Runtime-typed overload. The outbox relay only knows the message's
+    /// CLR type by name (deserialized from a stored string), not at compile
+    /// time, so it can't call the generic overload above.
+    /// </summary>
+    Task PublishAsync(object @event, Type eventType, CancellationToken cancellationToken = default);
 }

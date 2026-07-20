@@ -7,7 +7,9 @@ namespace OrderService.UnitTests;
 /// ============================ UNIT vs INTEGRATION ==========================
 /// UNIT TESTS (this project) test ONE handler in isolation:
 ///   - real database   -> replaced by EF's InMemory provider (fast, no I/O)
-///   - message broker  -> replaced by an NSubstitute mock of IEventPublisher
+///   - message broker  -> never touched; CreateOrderCommandHandler only
+///                        writes to the outbox (IOutboxWriter), so these
+///                        tests don't need RabbitMQ or even a mock of it
 ///   - HTTP layer      -> doesn't exist; we call Handle() directly
 /// They answer: "is the LOGIC of this handler correct?"
 /// They run in milliseconds, so you can run hundreds on every save.

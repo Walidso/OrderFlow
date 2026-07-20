@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using OrderService.Application.Abstractions;
+using OrderService.Application.Outbox;
 using OrderService.Domain.Entities;
 
 namespace OrderService.Infrastructure.Persistence;
@@ -19,6 +20,7 @@ public class OrderDbContext : DbContext, IApplicationDbContext
     // compiler warnings — a common modern EF idiom.
     public DbSet<Order> Orders => Set<Order>();
     public DbSet<User> Users => Set<User>();
+    public DbSet<OutboxMessage> OutboxMessages => Set<OutboxMessage>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

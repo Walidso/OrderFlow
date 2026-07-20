@@ -1,3 +1,4 @@
+using InventoryService.Worker.Idempotency;
 using InventoryService.Worker.Stock;
 using MassTransit;
 using OrderFlow.Contracts;
@@ -34,21 +35,47 @@ namespace InventoryService.Worker.Consumers;
 /// Same philosophy in both: NEVER silently drop a failed message. Park it
 /// where a human can inspect, fix, and replay it.
 /// ============================================================================
+///
+/// ======================= IDEMPOTENCY (redelivery safety) ===================
+/// Messaging is at-least-once, and since OrderService publishes through a
+/// transactional outbox, a redelivery isn't even a rare edge case — the
+/// relay WILL republish (as a brand new message) anything it isn't sure got
+/// through. Without a guard, a duplicate OrderCreated would call
+/// TryReserve() twice and double-decrement stock for one order.
+///
+/// _processedOrders is checked FIRST (skip work already done) and marked
+/// LAST, only after the outcome (StockReserved/StockRejected) is published
+/// (only decide once). Marking it any earlier would break the retry demo
+/// below: a thrown exception must be free to actually retry the real work,
+/// not silently no-op on attempt two.
+/// ============================================================================
 /// </summary>
 public sealed class OrderCreatedConsumer : IConsumer<OrderCreated>
 {
     private readonly IStockStore _stock;
+    private readonly IProcessedOrderStore _processedOrders;
     private readonly ILogger<OrderCreatedConsumer> _logger;
 
-    public OrderCreatedConsumer(IStockStore stock, ILogger<OrderCreatedConsumer> logger)
+    public OrderCreatedConsumer(
+        IStockStore stock, IProcessedOrderStore processedOrders, ILogger<OrderCreatedConsumer> logger)
     {
         _stock = stock;
+        _processedOrders = processedOrders;
         _logger = logger;
     }
 
     public async Task Consume(ConsumeContext<OrderCreated> context)
     {
         var message = context.Message;
+
+        if (_processedOrders.HasBeenProcessed(message.OrderId))
+        {
+            _logger.LogInformation(
+                "Duplicate delivery of OrderCreated for order {OrderId} — already decided, skipping.",
+                message.OrderId);
+            return;
+        }
+
         _logger.LogInformation("Received OrderCreated for order {OrderId}", message.OrderId);
 
         // --- Demo poison message -------------------------------------------
@@ -82,5 +109,7 @@ public sealed class OrderCreatedConsumer : IConsumer<OrderCreated>
             _logger.LogInformation(
                 "Stock rejected for order {OrderId}: {Reason}", message.OrderId, reason);
         }
+
+        _processedOrders.MarkProcessed(message.OrderId);
     }
 }

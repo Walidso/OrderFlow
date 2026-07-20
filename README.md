@@ -1,5 +1,7 @@
 # OrderFlow 🍎
 
+[![CI](https://github.com/Walidso/OrderFlow/actions/workflows/ci.yml/badge.svg)](https://github.com/Walidso/OrderFlow/actions/workflows/ci.yml)
+
 A small but complete **event-driven microservices system** built with .NET 8 — created as a hands-on portfolio project to demonstrate Clean Architecture, CQRS, async messaging, testing, and containerization.
 
 **The flow in one sentence:** a user registers, logs in, and places an order via a REST API; the order is saved as `Pending` and an event is published; a separate Inventory service consumes it, reserves stock, and answers with an event that flips the order to `Confirmed` or `Rejected`.
@@ -55,8 +57,9 @@ That's it — migrations apply automatically on startup.
 dotnet test
 ```
 
-- **Unit tests** (`tests/OrderService.UnitTests`) — handlers in isolation, EF InMemory + NSubstitute mocks, milliseconds each
-- **Integration tests** (`tests/OrderService.IntegrationTests`) — the real app booted in memory via `WebApplicationFactory`, real HTTP, real JWT validation, SQLite instead of Postgres, MassTransit test harness instead of RabbitMQ. No Docker needed.
+- **Order Service unit tests** (`tests/OrderService.UnitTests`) — handlers in isolation, EF InMemory + NSubstitute mocks, milliseconds each
+- **Order Service integration tests** (`tests/OrderService.IntegrationTests`) — the real app booted in memory via `WebApplicationFactory`, real HTTP, real JWT validation, SQLite instead of Postgres, MassTransit test harness instead of RabbitMQ. No Docker needed.
+- **Inventory Service unit tests** (`tests/InventoryService.UnitTests`) — `OrderCreatedConsumer` tested by mocking `ConsumeContext<T>` directly (it's just an interface — no bus needed), including the duplicate-delivery and thrown-exception idempotency cases.
 
 ## Tech decisions
 
@@ -70,6 +73,7 @@ dotnet test
 | PBKDF2 password hashing | Built into .NET, no dependency, salted + 100k iterations | Argon2/bcrypt are stronger choices if adding a package is acceptable |
 | Global exception middleware → RFC 7807 | One error contract for all endpoints; no leaked stack traces | — |
 | In-memory stock store (Inventory) | Keeps the demo focused on messaging patterns | Stock resets on restart; a real service owns its own DB |
+| Hand-rolled Transactional Outbox | Save + publish become one atomic `SaveChangesAsync()`; a background poller relays events, closing the "order saved but event lost" gap | MassTransit ships an EF outbox that does this with less code — hand-rolled so the mechanics are visible and explainable, not hidden behind a NuGet feature flag |
 
 ## Project layout
 
@@ -82,22 +86,45 @@ src/
     OrderService.Infrastructure/  # EF Core, migrations, JWT, MassTransit
     OrderService.Api/             # controllers, middleware, Program.cs
   InventoryService/
-    InventoryService.Worker/      # MassTransit consumer + in-memory stock
+    InventoryService.Worker/      # MassTransit consumer + in-memory stock/idempotency
 web/                              # static HTML/CSS/JS UI, served by nginx
 tests/
   OrderService.UnitTests/
   OrderService.IntegrationTests/
+  InventoryService.UnitTests/
 ```
+
+## Transactional Outbox
+
+`CreateOrderCommandHandler` used to save the order, then publish `OrderCreated` in a second, separate step — a crash between the two left a `Pending` order no one would ever process. That gap is closed now:
+
+- The handler writes the order **and** an `OutboxMessage` row (the serialized event) through the **same** `SaveChangesAsync()` call — one transaction, so either both commit or neither does.
+- A background poller (`OutboxDispatcherBackgroundService`, `Infrastructure/Outbox/`) reads unprocessed rows every couple of seconds, publishes them through the same `IEventPublisher` port, and marks them processed. A failed publish (broker down, etc.) just leaves the row for the next poll — up to a configurable `MaxRetries`, after which it's left in place with its last error for a human to inspect, the outbox's version of a dead-letter queue.
+
+See `src/OrderService/OrderService.Application/Orders/Commands/CreateOrder/CreateOrderCommandHandler.cs` and `src/OrderService/OrderService.Infrastructure/Outbox/` for the implementation, and `tests/OrderService.UnitTests/OutboxDispatcherTests.cs` for the retry/poison-message behavior under test.
+
+## Idempotent consumers
+
+The outbox above guarantees *at-least-once* delivery, not exactly-once — if the relay crashes after a successful publish but before marking its row processed, it republishes the same event as a brand-new message on the next poll. Without a guard, `OrderCreatedConsumer` would call `TryReserve()` twice for one order and double-decrement stock.
+
+- **Inventory side (the real risk):** `OrderCreatedConsumer` now checks an `IProcessedOrderStore` keyed by `OrderId` — not MassTransit's transport `MessageId`, since a re-published message gets a fresh one — before doing any work, and only marks the order processed *after* successfully publishing the outcome. A thrown exception (the `DURIAN-1` demo) never marks it processed, so MassTransit's own retry ladder still retries for real. In-memory here for the same honest reason `InMemoryStockStore` is: this demo's Inventory Service owns no database.
+- **Order Service side (already safe):** `StockReservedConsumer`/`StockRejectedConsumer` don't need a separate tracking table — `Order.MarkConfirmed()`/`MarkRejected()` are no-ops once the order has left `Pending`, so a duplicate delivery just re-applies a state transition that's already happened. Idempotency here falls out of the domain model itself.
+
+See `src/InventoryService/InventoryService.Worker/Idempotency/` and `tests/InventoryService.UnitTests/OrderCreatedConsumerTests.cs` (the `DuplicateDelivery` and `ThrownException` cases specifically).
+
+## CI
+
+`.github/workflows/ci.yml` runs on every push/PR to `master`, as two jobs:
+
+- **test** — restore, build, and `dotnet test` the whole solution in Release. No Docker involved: the integration tests already swap Postgres/RabbitMQ for SQLite + MassTransit's in-memory test harness specifically so CI doesn't need them. Trx results for all three test projects are uploaded as a build artifact.
+- **docker** — `docker compose build`, so a broken Dockerfile fails CI even when the .NET build itself is fine.
 
 ## What I would improve next
 
 Honest scope: this is a learning/portfolio project, so these were deliberately left out —
 
-1. **Transactional Outbox** — today "save order" and "publish event" are two separate operations; a crash in between loses the event. The outbox pattern writes the event to the DB in the same transaction and relays it afterwards.
-2. **Persistent inventory** — give Inventory its own database instead of in-memory stock.
-3. **Idempotent consumers** — track processed message IDs so duplicate deliveries can never double-reserve stock.
-4. **API gateway + rate limiting** — a single entry point (e.g. YARP) in front of the services.
-5. **Observability** — OpenTelemetry traces so one order can be followed across both services and the broker.
-6. **CI pipeline** — GitHub Actions running `dotnet test` + `docker compose build` on every push.
+1. **Persistent inventory** — give Inventory its own database instead of in-memory stock (would also make the idempotency guard above survive a restart).
+2. **API gateway + rate limiting** — a single entry point (e.g. YARP) in front of the services.
+3. **Observability** — OpenTelemetry traces so one order can be followed across both services and the broker.
 
 See `INTERVIEW_DEFENSE.md` for how I'd talk about every decision in an interview.

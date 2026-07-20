@@ -48,15 +48,23 @@ Every question an interviewer might ask about this project, with a ~30-second an
 
 ### 8. What happens if the order saves but publishing the event fails?
 
-**Answer:** Honest weakness, documented in the README: the save and the publish are two operations, not one atomic step. A crash between them leaves a `Pending` order no one will ever process. The fix is the Transactional Outbox pattern — write the event into an outbox table *inside the same DB transaction* as the order, then a relay publishes from that table. MassTransit ships an EF outbox; it's my top listed improvement. Knowing the gap and its named fix is the point of the exercise.
+**Answer:** This used to be a real gap — save and publish were two separate operations, and a crash between them left a `Pending` order no one would ever process. I closed it with the Transactional Outbox pattern: `CreateOrderCommandHandler` writes the order **and** an `OutboxMessage` row (the serialized event) through the same `SaveChangesAsync()` call, so they're one atomic transaction — either both exist or neither does. A background poller (`OutboxDispatcherBackgroundService`) reads unprocessed rows, publishes them through the same `IEventPublisher` port the handler used to call directly, and marks them processed. If the process crashes right after the order commits, the outbox row is still there — the poller picks it up on the next run, no event lost. I hand-rolled this rather than reaching for MassTransit's built-in EF outbox specifically so I could point to the mechanics directly in an interview instead of "I enabled a NuGet feature."
 
-**Follow-up: "And duplicate events?"** Outbox gives at-least-once, so consumers must be idempotent. My status transitions (`MarkConfirmed`) are no-ops when re-applied, and a full solution tracks processed message IDs.
+**Follow-up: "And duplicate events?"** The outbox still only gives *at-least-once* delivery — if the poller publishes successfully but crashes before marking the row processed, it republishes on the next run, as a brand-new message. I didn't leave that as a hand-wave: `OrderCreatedConsumer` (the one place that actually mutates shared state — stock) now checks an `IProcessedOrderStore` keyed by `OrderId` before doing any work, and only marks it after successfully publishing the outcome. `StockReservedConsumer`/`StockRejectedConsumer` don't need the same table — `Order.MarkConfirmed`/`MarkRejected` are already no-ops once the order has left `Pending`, so idempotency there falls straight out of the domain model. See Q9a.
+
+**Follow-up: "Why poll instead of publishing immediately after commit?"** I could do both — publish immediately as a latency optimization, with the outbox as the safety net for whatever that immediate attempt misses (a crash before it runs, a broker blip). I kept it poll-only for now: it's simpler to reason about and test, and a couple of seconds of extra latency before Inventory sees an order is a trade-off I'm happy to name in a demo.
 
 ### 9. How does your retry / error-queue setup work?
 
 **Answer:** The Inventory endpoint has `UseMessageRetry` with intervals 1s / 5s / 15s — increasing gaps to let transient faults heal. If the final attempt still throws, MassTransit moves the message to `inventory-order-created_error` with the exception in its headers, where a human can inspect and replay it. Crucially, out-of-stock is *not* an exception — it's a valid business outcome, so I publish `StockRejected` and complete the message. Retry transient faults, never business outcomes.
 
 **Follow-up: "How would you replay from the error queue?"** RabbitMQ management UI shovel/move back to the original queue, or programmatically. In ASB terms: receive from the DLQ, fix, resubmit.
+
+### 9a. Why key idempotency off `OrderId` instead of MassTransit's `MessageId`?
+
+**Answer:** Transport-level dedupe (MessageId) only protects against the *transport* redelivering the same envelope — a broker requeue after an unacked message, for instance. It does nothing against my own outbox relay legitimately publishing a *new* message that represents the *same* business event: if the relay crashes after `IPublishEndpoint.Publish` succeeds but before it marks its row processed, the next poll republishes that row as a fresh message with a fresh MessageId. `OrderId` is the actual identity of "the thing that must only produce one outcome," so that's what `IProcessedOrderStore` keys on.
+
+**Follow-up: "Why mark it processed only at the end?"** If I marked it at the start, a genuinely failed attempt (say, the DURIAN-1 demo, which throws) would be flagged done even though nothing succeeded — MassTransit's retry ladder would fire again, hit my "already processed" check, and silently skip real work instead of actually retrying. Check-at-start, mark-only-after-success is what keeps retries and duplicate-suppression from fighting each other.
 
 ### 10. Explain your JWT flow end to end.
 
@@ -114,7 +122,9 @@ Every question an interviewer might ask about this project, with a ~30-second an
 
 ### 20. What would you do differently for production?
 
-**Answer:** In priority order: transactional outbox (atomicity of save+publish), idempotent consumers with processed-message tracking, secrets out of appsettings into a vault/env injection, asymmetric JWT keys or delegating auth to an identity provider, migrations as a deploy step, persistent inventory DB, OpenTelemetry tracing across services, and CI running tests plus image builds. I kept them out deliberately — the README says so — because a junior project that *knows* its cuts beats one that pretends to be Netflix.
+**Answer:** In priority order: secrets out of appsettings into a vault/env injection, asymmetric JWT keys or delegating auth to an identity provider, migrations as a deploy step, persistent inventory DB (which would also make my in-memory idempotency guard survive a restart), and OpenTelemetry tracing across services. (Transactional outbox, idempotent consumers, and a CI pipeline used to top this list; all three are implemented now — see Q8, Q9a, and the GitHub Actions workflow.) I kept the rest out deliberately — the README says so — because a junior project that *knows* its cuts beats one that pretends to be Netflix.
+
+**Follow-up: "Walk me through your CI pipeline."** Two jobs on every push/PR to master. `test` restores, builds, and runs the full solution's tests in Release — no Docker needed, because the integration tests already swap Postgres/RabbitMQ for SQLite and MassTransit's in-memory test harness for exactly this reason (fast, hermetic CI). `docker` then runs `docker compose build` so a broken Dockerfile fails the pipeline even if the plain .NET build was fine — that's a real gap otherwise, since `dotnet build` and `docker build` can diverge (missing COPY paths, wrong working directory, etc.).
 
 ---
 

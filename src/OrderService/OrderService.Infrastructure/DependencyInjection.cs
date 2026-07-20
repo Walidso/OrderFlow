@@ -6,6 +6,7 @@ using OrderService.Application.Abstractions;
 using OrderService.Infrastructure.Auth;
 using OrderService.Infrastructure.Messaging;
 using OrderService.Infrastructure.Messaging.Consumers;
+using OrderService.Infrastructure.Outbox;
 using OrderService.Infrastructure.Persistence;
 
 namespace OrderService.Infrastructure;
@@ -34,6 +35,15 @@ public static class DependencyInjection
 
         // ------------------- Messaging -------------------
         services.AddScoped<IEventPublisher, MassTransitEventPublisher>();
+
+        // ------------------- Outbox -------------------
+        // Enqueue (Application) writes rows in the same transaction as the
+        // business change; Dispatch (background service) relays them to the
+        // broker afterwards. Together they make "save + publish" atomic.
+        services.Configure<OutboxOptions>(configuration.GetSection(OutboxOptions.SectionName));
+        services.AddScoped<IOutboxWriter, EfOutboxWriter>();
+        services.AddScoped<IOutboxDispatcher, OutboxDispatcher>();
+        services.AddHostedService<OutboxDispatcherBackgroundService>();
 
         services.AddMassTransit(x =>
         {

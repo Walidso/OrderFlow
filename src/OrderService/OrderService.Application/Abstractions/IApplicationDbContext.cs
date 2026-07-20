@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using OrderService.Application.Outbox;
 using OrderService.Domain.Entities;
 
 namespace OrderService.Application.Abstractions;
@@ -16,6 +17,14 @@ public interface IApplicationDbContext
 {
     DbSet<Order> Orders { get; }
     DbSet<User> Users { get; }
+
+    /// <summary>
+    /// Staged outbox rows. Handlers don't add to this directly — go through
+    /// IOutboxWriter.Enqueue(), which is exposed here only so a single
+    /// SaveChangesAsync() call commits both the business change and the
+    /// outbox row atomically.
+    /// </summary>
+    DbSet<OutboxMessage> OutboxMessages { get; }
 
     /// <summary>
     /// Commits all tracked changes in ONE transaction.
