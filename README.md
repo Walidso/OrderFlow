@@ -46,6 +46,7 @@ That's it — migrations apply automatically on startup.
 4. `GET /api/v1/orders/{id}` → watch status go `Pending` → `Confirmed`
 5. Peek at stock dropping: http://localhost:5002/stock
 6. RabbitMQ UI: http://localhost:15672 (guest / guest)
+7. Jaeger UI: http://localhost:16686 → pick `order-service` → find the trace → watch it span the REST call, the Postgres write, the RabbitMQ publish, and Inventory's consumer as one waterfall
 
 **Break it on purpose (the fun part) — via the web UI presets or manually:**
 - Order `MANGO-1` with quantity 5 → order becomes `Rejected` (only 3 in stock)
@@ -75,6 +76,7 @@ dotnet test
 | Global exception middleware → RFC 7807 | One error contract for all endpoints; no leaked stack traces | — |
 | Inventory's own PostgreSQL | Database-per-service kept honest instead of an in-memory dictionary; stock and the idempotency guard both survive a restart; a conditional `UPDATE ... WHERE AvailableQuantity >= @qty` inside a transaction replaces an in-process lock, so reservation stays correct even with multiple replicas | A second Postgres container (`inventory-db`) — cheap locally, but two databases to operate instead of one |
 | Hand-rolled Transactional Outbox | Save + publish become one atomic `SaveChangesAsync()`; a background poller relays events, closing the "order saved but event lost" gap | MassTransit ships an EF outbox that does this with less code — hand-rolled so the mechanics are visible and explainable, not hidden behind a NuGet feature flag |
+| OpenTelemetry + Jaeger (OTLP) | Free, single container, standard vendor-neutral SDK; MassTransit and Npgsql both ship their own instrumentation, so most of the wiring is a few `TracerProviderBuilder` calls, not custom code | One more container to run locally; a managed backend (Honeycomb, Azure Monitor, Datadog) would just be a different OTLP endpoint, not a rewrite |
 
 ## Project layout
 
@@ -124,6 +126,20 @@ The interesting part isn't "add EF Core", it's how `EfStockStore` keeps the ALL-
 
 See `src/InventoryService/InventoryService.Worker/Stock/EfStockStore.cs` and `tests/InventoryService.UnitTests/EfStockStoreTests.cs` (the rollback test specifically proves an already-applied line gets undone when a later line fails).
 
+## Distributed tracing
+
+Before this, understanding what happened to one order meant reading two services' logs side by side and matching timestamps by eye. Both services now export traces (OpenTelemetry → OTLP → Jaeger, `http://localhost:16686`), so a single order shows up as **one trace** spanning:
+
+`POST /api/v1/orders` → the Postgres `INSERT` (order + outbox row, same span-parent since it's the same `SaveChangesAsync()`) → the outbox relay's RabbitMQ publish → Inventory's `OrderCreatedConsumer` → its Postgres `UPDATE` → its RabbitMQ publish back → `StockReservedConsumer`/`StockRejectedConsumer` → the final Postgres `UPDATE` that flips the order's status.
+
+- **ASP.NET Core instrumentation** traces the inbound HTTP request (with `/health` filtered out — it's polled constantly and adds nothing but noise).
+- **Npgsql's own instrumentation** (`Npgsql.OpenTelemetry`) traces every SQL command against either database — no separate EF Core-specific package needed.
+- **MassTransit publishes its own spans** on an ActivitySource literally named `"MassTransit"`. Listening for that source is the one line (`AddSource("MassTransit")`) that makes the publish in one service and the consume in the other join the *same* trace instead of being two unrelated ones — MassTransit propagates the trace context through the message headers for you.
+
+The one non-obvious line in both services' setup: OpenTelemetry's hosting builder (`WithTracing(...)`) implements *both* `TracerProviderBuilder` and `IServiceCollection`, which collides with EF Core's own unrelated `AddNpgsql<TContext>(IServiceCollection)` extension under normal `tracing.AddNpgsql()` syntax — worth calling out if it comes up, see the comment in `OrderService.Infrastructure/DependencyInjection.cs`.
+
+If Jaeger isn't running (e.g. `dotnet run` without `docker compose`), the OTLP exporter just fails to connect in the background — non-fatal, the app runs normally, you simply don't get traces.
+
 ## CI
 
 `.github/workflows/ci.yml` runs on every push/PR to `master`, as two jobs:
@@ -136,6 +152,5 @@ See `src/InventoryService/InventoryService.Worker/Stock/EfStockStore.cs` and `te
 Honest scope: this is a learning/portfolio project, so these were deliberately left out —
 
 1. **API gateway + rate limiting** — a single entry point (e.g. YARP) in front of the services.
-2. **Observability** — OpenTelemetry traces so one order can be followed across both services and the broker.
 
 See `INTERVIEW_DEFENSE.md` for how I'd talk about every decision in an interview.

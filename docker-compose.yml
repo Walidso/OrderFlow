@@ -6,13 +6,17 @@
 #                   "Why do the two services share no database" — same rule
 #                   applies here: no shared tables between services)
 #   rabbitmq   - the message broker (+ management UI on :15672, guest/guest)
+#   jaeger     - collects the distributed traces both services emit
+#                -> http://localhost:16686
 #   order-service     - REST API           -> http://localhost:5001/swagger
 #   inventory-service - event-driven worker -> http://localhost:5002/stock
 #   web               - browser UI for the whole flow -> http://localhost:5003
 #
 # depends_on + condition: service_healthy means the .NET services only start
 # AFTER their databases and RabbitMQ report healthy — no crash-loop on cold
-# start.
+# start. Jaeger has no such gate: the OTLP exporter is fire-and-forget, so a
+# service starting before Jaeger is ready just means its first few spans
+# don't land anywhere — never a crash.
 # ============================================================================
 
 services:
@@ -55,6 +59,14 @@ services:
       timeout: 10s
       retries: 10
 
+  jaeger:
+    image: jaegertracing/all-in-one:1.57
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"  # UI — open this after placing an order to see the trace
+      - "4317:4317"    # OTLP gRPC receiver (both services export here)
+
   order-service:
     build:
       context: .   # repo root so the Dockerfile can see all referenced projects
@@ -68,11 +80,14 @@ services:
       # the hosts are the service names, not localhost.
       ConnectionStrings__OrderDb: "Host=postgres;Port=5432;Database=orderflow;Username=postgres;Password=postgres"
       RabbitMq__Host: rabbitmq
+      Otlp__Endpoint: "http://jaeger:4317"
     depends_on:
       postgres:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
+      jaeger:
+        condition: service_started
 
   inventory-service:
     build:
@@ -84,11 +99,14 @@ services:
       ASPNETCORE_ENVIRONMENT: Development
       ConnectionStrings__InventoryDb: "Host=inventory-db;Port=5432;Database=inventory;Username=postgres;Password=postgres"
       RabbitMq__Host: rabbitmq
+      Otlp__Endpoint: "http://jaeger:4317"
     depends_on:
       rabbitmq:
         condition: service_healthy
       inventory-db:
         condition: service_healthy
+      jaeger:
+        condition: service_started
 
   web:
     build:

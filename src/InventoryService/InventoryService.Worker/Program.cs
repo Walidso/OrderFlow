@@ -4,6 +4,8 @@ using InventoryService.Worker.Persistence;
 using InventoryService.Worker.Stock;
 using MassTransit;
 using Microsoft.EntityFrameworkCore;
+using OpenTelemetry.Resources;
+using OpenTelemetry.Trace;
 
 // ============================================================================
 // The Inventory Service is a lightweight event-driven worker.
@@ -60,6 +62,26 @@ builder.Services.AddMassTransit(x =>
 
 builder.Services.AddHealthChecks()
     .AddDbContextCheck<InventoryDbContext>();
+
+// ------------------- Observability -------------------
+// Same tracing stack as OrderService.Infrastructure — see its
+// DependencyInjection.cs comment for why AddNpgsql() needs the explicit
+// static call (OpenTelemetry's hosting builder implements both
+// TracerProviderBuilder and IServiceCollection, colliding with EF Core's
+// own unrelated AddNpgsql<TContext> extension). Listening for the
+// "MassTransit" ActivitySource here is what joins this consumer's spans to
+// the same trace as the order that triggered it.
+builder.Services.AddOpenTelemetry()
+    .ConfigureResource(resource => resource.AddService("inventory-service"))
+    .WithTracing(tracing =>
+    {
+        tracing.AddAspNetCoreInstrumentation(options =>
+            options.Filter = httpContext => httpContext.Request.Path != "/health");
+        global::Npgsql.TracerProviderBuilderExtensions.AddNpgsql(tracing);
+        tracing.AddSource("MassTransit");
+        tracing.AddOtlpExporter(otlp => otlp.Endpoint =
+            new Uri(builder.Configuration["Otlp:Endpoint"] ?? "http://localhost:4317"));
+    });
 
 // Lets the browser-based Web UI (a different origin/port) poll /stock.
 builder.Services.AddCors(options =>
