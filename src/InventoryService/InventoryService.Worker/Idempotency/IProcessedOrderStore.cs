@@ -13,14 +13,13 @@ namespace InventoryService.Worker.Idempotency;
 /// dedupe would miss that entirely; OrderId is the actual business identity
 /// of "the thing that must only happen once."
 ///
-/// In-memory here for the same honest reason InMemoryStockStore is: this
-/// demo's Inventory Service owns no database. A real deployment would use a
-/// persisted "inbox" table (or the stock reservation table itself, keyed on
-/// OrderId) so this survives a restart.
+/// EfProcessedOrderStore is the real, persisted implementation (see README
+/// "Persistent inventory" — a restart no longer forgets what's already been
+/// decided). InMemoryProcessedOrderStore remains as a fast test double.
 /// </summary>
 public interface IProcessedOrderStore
 {
-    bool HasBeenProcessed(Guid orderId);
+    Task<bool> HasBeenProcessedAsync(Guid orderId, CancellationToken cancellationToken = default);
 
-    void MarkProcessed(Guid orderId);
+    Task MarkProcessedAsync(Guid orderId, CancellationToken cancellationToken = default);
 }

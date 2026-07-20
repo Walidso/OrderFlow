@@ -2,6 +2,12 @@ using OrderFlow.Contracts;
 
 namespace InventoryService.Worker.Stock;
 
+/// <summary>
+/// The original in-memory stock store. No longer wired into Program.cs —
+/// production now uses EfStockStore against a real Postgres database — but
+/// kept as a fast, DB-less test double for consumer tests that don't care
+/// about persistence, only about "did TryReserve get called correctly".
+/// </summary>
 public sealed class InMemoryStockStore : IStockStore
 {
     // Seeded demo inventory for the fruit store. 🍎
@@ -18,10 +24,13 @@ public sealed class InMemoryStockStore : IStockStore
     // not thread-safe for writes. A plain lock (Python bridge:
     // `with threading.Lock():`) keeps check-then-decrement atomic —
     // ConcurrentDictionary alone would NOT be enough, because we must check
-    // ALL lines before decrementing ANY of them.
+    // ALL lines before decrementing ANY of them. (EfStockStore replaces this
+    // in-process lock with a database-enforced atomic update — see its
+    // comments for why that matters once there's more than one replica.)
     private readonly object _gate = new();
 
-    public bool TryReserve(IReadOnlyList<OrderLine> lines, out string failureReason)
+    public Task<StockReservationResult> TryReserveAsync(
+        IReadOnlyList<OrderLine> lines, CancellationToken cancellationToken = default)
     {
         lock (_gate)
         {
@@ -29,33 +38,27 @@ public sealed class InMemoryStockStore : IStockStore
             foreach (var line in lines)
             {
                 if (!_stock.TryGetValue(line.ProductId, out var available))
-                {
-                    failureReason = $"Unknown product '{line.ProductId}'.";
-                    return false;
-                }
+                    return Task.FromResult(StockReservationResult.Rejected($"Unknown product '{line.ProductId}'."));
+
                 if (available < line.Quantity)
-                {
-                    failureReason =
+                    return Task.FromResult(StockReservationResult.Rejected(
                         $"Insufficient stock for '{line.ProductId}': " +
-                        $"requested {line.Quantity}, available {available}.";
-                    return false;
-                }
+                        $"requested {line.Quantity}, available {available}."));
             }
 
             // Pass 2: only now mutate.
             foreach (var line in lines)
                 _stock[line.ProductId] -= line.Quantity;
 
-            failureReason = string.Empty;
-            return true;
+            return Task.FromResult(StockReservationResult.Reserved());
         }
     }
 
-    public IReadOnlyDictionary<string, int> Snapshot()
+    public Task<IReadOnlyDictionary<string, int>> SnapshotAsync(CancellationToken cancellationToken = default)
     {
         lock (_gate)
         {
-            return new Dictionary<string, int>(_stock);
+            return Task.FromResult<IReadOnlyDictionary<string, int>>(new Dictionary<string, int>(_stock));
         }
     }
 }

@@ -1,7 +1,9 @@
 using InventoryService.Worker.Consumers;
 using InventoryService.Worker.Idempotency;
+using InventoryService.Worker.Persistence;
 using InventoryService.Worker.Stock;
 using MassTransit;
+using Microsoft.EntityFrameworkCore;
 
 // ============================================================================
 // The Inventory Service is a lightweight event-driven worker.
@@ -11,12 +13,19 @@ using MassTransit;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Singleton: ONE stock store for the whole process — it IS our "database".
-builder.Services.AddSingleton<IStockStore, InMemoryStockStore>();
+// ------------------- Database -------------------
+// Its OWN Postgres, separate from OrderService's — see README "Persistent
+// inventory" / "Why do the two services share no database". Stock and the
+// idempotency guard both live here now instead of in-process memory, so
+// neither forgets anything on restart.
+builder.Services.AddDbContext<InventoryDbContext>(options =>
+    options.UseNpgsql(builder.Configuration.GetConnectionString("InventoryDb")));
 
-// Singleton for the same reason: the dedupe guard must be shared across
-// every message this process ever consumes, not scoped per-message.
-builder.Services.AddSingleton<IProcessedOrderStore, InMemoryProcessedOrderStore>();
+// Scoped, not Singleton: MassTransit resolves consumers (and therefore
+// their dependencies) per message with a scoped lifetime, exactly like
+// OrderService's StockReservedConsumer takes a scoped DbContext per message.
+builder.Services.AddScoped<IStockStore, EfStockStore>();
+builder.Services.AddScoped<IProcessedOrderStore, EfProcessedOrderStore>();
 
 builder.Services.AddMassTransit(x =>
 {
@@ -49,7 +58,8 @@ builder.Services.AddMassTransit(x =>
     });
 });
 
-builder.Services.AddHealthChecks();
+builder.Services.AddHealthChecks()
+    .AddDbContextCheck<InventoryDbContext>();
 
 // Lets the browser-based Web UI (a different origin/port) poll /stock.
 builder.Services.AddCors(options =>
@@ -67,6 +77,27 @@ app.UseCors("WebUi");
 app.MapHealthChecks("/health");
 
 // Peek endpoint for demos: watch numbers drop as orders are confirmed.
-app.MapGet("/stock", (IStockStore store) => Results.Ok(store.Snapshot()));
+app.MapGet("/stock", async (IStockStore store) => Results.Ok(await store.SnapshotAsync()));
+
+// ---- Apply EF Core migrations on startup ----
+// Same pragmatic "just works" choice as OrderService.Api — see its
+// Program.cs and INTERVIEW_DEFENSE.md for why this is wrong for a
+// multi-replica production deployment.
+using (var scope = app.Services.CreateScope())
+{
+    var db = scope.ServiceProvider.GetRequiredService<InventoryDbContext>();
+
+    if (db.Database.IsNpgsql())
+    {
+        db.Database.Migrate();
+    }
+    else
+    {
+        // Test doubles for this service (see InventoryService.UnitTests)
+        // build InventoryDbContext straight against the model instead of
+        // Postgres-specific migration SQL.
+        db.Database.EnsureCreated();
+    }
+}
 
 app.Run();

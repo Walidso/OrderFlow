@@ -6,43 +6,44 @@ namespace InventoryService.UnitTests;
 public class InMemoryProcessedOrderStoreTests
 {
     [Fact]
-    public void HasBeenProcessed_UnknownOrder_ReturnsFalse()
+    public async Task HasBeenProcessedAsync_UnknownOrder_ReturnsFalse()
     {
         var store = new InMemoryProcessedOrderStore();
 
-        Assert.False(store.HasBeenProcessed(Guid.NewGuid()));
+        Assert.False(await store.HasBeenProcessedAsync(Guid.NewGuid()));
     }
 
     [Fact]
-    public void HasBeenProcessed_AfterMarkProcessed_ReturnsTrue()
+    public async Task HasBeenProcessedAsync_AfterMarkProcessed_ReturnsTrue()
     {
         var store = new InMemoryProcessedOrderStore();
         var orderId = Guid.NewGuid();
 
-        store.MarkProcessed(orderId);
+        await store.MarkProcessedAsync(orderId);
 
-        Assert.True(store.HasBeenProcessed(orderId));
+        Assert.True(await store.HasBeenProcessedAsync(orderId));
     }
 
     [Fact]
-    public void HasBeenProcessed_DoesNotConfuseDifferentOrders()
+    public async Task HasBeenProcessedAsync_DoesNotConfuseDifferentOrders()
     {
         var store = new InMemoryProcessedOrderStore();
-        store.MarkProcessed(Guid.NewGuid());
+        await store.MarkProcessedAsync(Guid.NewGuid());
 
-        Assert.False(store.HasBeenProcessed(Guid.NewGuid()));
+        Assert.False(await store.HasBeenProcessedAsync(Guid.NewGuid()));
     }
 
     [Fact]
-    public void MarkProcessed_ConcurrentCallsForDifferentOrders_AllRecorded()
+    public async Task MarkProcessedAsync_ConcurrentCallsForDifferentOrders_AllRecorded()
     {
         // Mirrors why InMemoryStockStore takes a lock: the bus can hand this
         // singleton messages for many orders concurrently.
         var store = new InMemoryProcessedOrderStore();
         var orderIds = Enumerable.Range(0, 200).Select(_ => Guid.NewGuid()).ToList();
 
-        Parallel.ForEach(orderIds, store.MarkProcessed);
+        await Task.WhenAll(orderIds.Select(id => store.MarkProcessedAsync(id)));
 
-        Assert.All(orderIds, id => Assert.True(store.HasBeenProcessed(id)));
+        foreach (var id in orderIds)
+            Assert.True(await store.HasBeenProcessedAsync(id));
     }
 }

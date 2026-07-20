@@ -67,8 +67,9 @@ public sealed class OrderCreatedConsumer : IConsumer<OrderCreated>
     public async Task Consume(ConsumeContext<OrderCreated> context)
     {
         var message = context.Message;
+        var cancellationToken = context.CancellationToken;
 
-        if (_processedOrders.HasBeenProcessed(message.OrderId))
+        if (await _processedOrders.HasBeenProcessedAsync(message.OrderId, cancellationToken))
         {
             _logger.LogInformation(
                 "Duplicate delivery of OrderCreated for order {OrderId} — already decided, skipping.",
@@ -90,7 +91,9 @@ public sealed class OrderCreatedConsumer : IConsumer<OrderCreated>
         }
         // --------------------------------------------------------------------
 
-        if (_stock.TryReserve(message.Lines, out var reason))
+        var result = await _stock.TryReserveAsync(message.Lines, cancellationToken);
+
+        if (result.Success)
         {
             // context.Publish (instead of a raw IPublishEndpoint) ties the
             // outgoing event to the incoming message's conversation, so
@@ -105,11 +108,11 @@ public sealed class OrderCreatedConsumer : IConsumer<OrderCreated>
             // Throwing here would retry forever for something retries can't
             // fix. (Interview one-liner: "retry transient faults, never
             // business outcomes.")
-            await context.Publish(new StockRejected(message.OrderId, reason));
+            await context.Publish(new StockRejected(message.OrderId, result.FailureReason));
             _logger.LogInformation(
-                "Stock rejected for order {OrderId}: {Reason}", message.OrderId, reason);
+                "Stock rejected for order {OrderId}: {Reason}", message.OrderId, result.FailureReason);
         }
 
-        _processedOrders.MarkProcessed(message.OrderId);
+        await _processedOrders.MarkProcessedAsync(message.OrderId, cancellationToken);
     }
 }

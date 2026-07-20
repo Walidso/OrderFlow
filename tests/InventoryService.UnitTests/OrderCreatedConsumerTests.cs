@@ -14,7 +14,9 @@ namespace InventoryService.UnitTests;
 /// interface) instead of standing up a real or in-memory bus — the fastest,
 /// least flaky way to unit test what a single Consume() call does, matching
 /// how OrderService.UnitTests calls handlers directly rather than going
-/// through MediatR.
+/// through MediatR. IStockStore/IProcessedOrderStore are mocked here too;
+/// EfStockStoreTests/EfProcessedOrderStoreTests cover the real, persisted
+/// implementations separately.
 /// </summary>
 public class OrderCreatedConsumerTests
 {
@@ -28,8 +30,8 @@ public class OrderCreatedConsumerTests
     private static IStockStore StockThatAlwaysReserves()
     {
         var stock = Substitute.For<IStockStore>();
-        stock.TryReserve(Arg.Any<IReadOnlyList<OrderLine>>(), out Arg.Any<string>())
-            .Returns(x => { x[1] = string.Empty; return true; });
+        stock.TryReserveAsync(Arg.Any<IReadOnlyList<OrderLine>>(), Arg.Any<CancellationToken>())
+            .Returns(Task.FromResult(StockReservationResult.Reserved()));
         return stock;
     }
 
@@ -53,8 +55,8 @@ public class OrderCreatedConsumerTests
     public async Task Consume_StockUnavailable_PublishesStockRejected()
     {
         var stock = Substitute.For<IStockStore>();
-        stock.TryReserve(Arg.Any<IReadOnlyList<OrderLine>>(), out Arg.Any<string>())
-            .Returns(x => { x[1] = "Insufficient stock for 'MANGO-1'."; return false; });
+        stock.TryReserveAsync(Arg.Any<IReadOnlyList<OrderLine>>(), Arg.Any<CancellationToken>())
+            .Returns(Task.FromResult(StockReservationResult.Rejected("Insufficient stock for 'MANGO-1'.")));
 
         var consumer = new OrderCreatedConsumer(
             stock, new InMemoryProcessedOrderStore(), NullLogger<OrderCreatedConsumer>.Instance);
@@ -82,7 +84,8 @@ public class OrderCreatedConsumerTests
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => consumer.Consume(context));
 
-        stock.DidNotReceive().TryReserve(Arg.Any<IReadOnlyList<OrderLine>>(), out Arg.Any<string>());
+        await stock.DidNotReceive().TryReserveAsync(
+            Arg.Any<IReadOnlyList<OrderLine>>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -104,7 +107,7 @@ public class OrderCreatedConsumerTests
         var redeliveryContext = CreateContext(new OrderCreated(orderId, Guid.NewGuid(), lines, DateTime.UtcNow));
         await consumer.Consume(redeliveryContext);
 
-        stock.Received(1).TryReserve(Arg.Any<IReadOnlyList<OrderLine>>(), out Arg.Any<string>());
+        await stock.Received(1).TryReserveAsync(Arg.Any<IReadOnlyList<OrderLine>>(), Arg.Any<CancellationToken>());
         await redeliveryContext.DidNotReceive().Publish(
             Arg.Any<StockReserved>(), Arg.Any<CancellationToken>());
     }
@@ -126,6 +129,6 @@ public class OrderCreatedConsumerTests
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => consumer.Consume(context));
 
-        Assert.False(processed.HasBeenProcessed(orderId));
+        Assert.False(await processed.HasBeenProcessedAsync(orderId));
     }
 }

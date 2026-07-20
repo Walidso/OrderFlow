@@ -1,5 +1,10 @@
 namespace InventoryService.Worker.Idempotency;
 
+/// <summary>
+/// No longer wired into Program.cs — production now uses
+/// EfProcessedOrderStore against the same Postgres database as stock, so
+/// the guard survives a restart. Kept as a fast, DB-less test double.
+/// </summary>
 public sealed class InMemoryProcessedOrderStore : IProcessedOrderStore
 {
     private readonly HashSet<Guid> _processedOrderIds = new();
@@ -9,19 +14,21 @@ public sealed class InMemoryProcessedOrderStore : IProcessedOrderStore
     // thread-safe for concurrent writes.
     private readonly object _gate = new();
 
-    public bool HasBeenProcessed(Guid orderId)
+    public Task<bool> HasBeenProcessedAsync(Guid orderId, CancellationToken cancellationToken = default)
     {
         lock (_gate)
         {
-            return _processedOrderIds.Contains(orderId);
+            return Task.FromResult(_processedOrderIds.Contains(orderId));
         }
     }
 
-    public void MarkProcessed(Guid orderId)
+    public Task MarkProcessedAsync(Guid orderId, CancellationToken cancellationToken = default)
     {
         lock (_gate)
         {
             _processedOrderIds.Add(orderId);
         }
+
+        return Task.CompletedTask;
     }
 }
