@@ -1,63 +1,43 @@
 using System.Text.Json;
+using InventoryService.Worker.Persistence;
+using MassTransit;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
-using OrderService.Application.Abstractions;
-using OrderService.Infrastructure.Persistence;
 
-namespace OrderService.Infrastructure.Outbox;
+namespace InventoryService.Worker.Outbox;
 
 /// <summary>
-/// The relay half of the outbox pattern. Reads unprocessed OutboxMessage
-/// rows, resolves each one's CLR type from its stored name, deserializes,
-/// and publishes through the same IEventPublisher port CreateOrderCommand
-/// used to go through directly. A failed publish (broker down, etc.) marks
-/// the row failed and leaves it unprocessed for the next poll — it never
-/// throws out of the batch, so one bad message can't starve the rest.
-///
-/// Injects OrderDbContext directly rather than IApplicationDbContext,
-/// mirroring StockReservedConsumer/StockRejectedConsumer: this runs outside
-/// an HTTP request, in its own DI scope created per poll, so there's no
-/// "current request" DbContext to share.
-///
-/// ==================== MULTI-REPLICA SAFE ROW CLAIMING ======================
-/// Scale OrderService.Api past one instance and every replica runs its own
-/// copy of this dispatcher on the same timer. Without coordination, two
-/// replicas' polls would read the SAME unprocessed rows and both publish
-/// them — harmless (consumers are idempotent) but wasteful. Against real
-/// Postgres, this claims a batch with `SELECT ... FOR UPDATE SKIP LOCKED`
-/// inside an explicit transaction: each replica's query locks (and thereby
-/// "claims") a disjoint set of rows, silently skipping any row another
-/// replica already has locked instead of blocking on it. EF's InMemory
-/// provider — what the unit tests use — has no row-locking SQL, so that
-/// path only runs against Postgres; tests fall back to the plain query,
-/// which is fine since they only exercise dispatch/retry logic, never
-/// concurrent claiming across replicas (that would need a real Postgres
-/// instance — out of scope the same way Testcontainers is elsewhere here).
-/// ============================================================================
+/// The relay half of Inventory's outbox — same mechanics as
+/// OrderService.Infrastructure.Outbox.OutboxDispatcher (see its comments for
+/// the full reasoning on SKIP LOCKED and backoff). Publishes via
+/// MassTransit's IPublishEndpoint directly rather than a custom
+/// IEventPublisher port: this service doesn't otherwise practice that
+/// port/adapter split (EfStockStore/EfProcessedOrderStore already take
+/// InventoryDbContext directly), so introducing one just for this would be
+/// inconsistent with how the rest of this project is built.
 /// </summary>
 public interface IOutboxDispatcher
 {
-    /// <summary>Dispatches up to one batch of pending messages. Returns how many were attempted.</summary>
     Task<int> DispatchPendingAsync(CancellationToken cancellationToken = default);
 }
 
 public sealed class OutboxDispatcher : IOutboxDispatcher
 {
-    private readonly OrderDbContext _db;
-    private readonly IEventPublisher _publisher;
+    private readonly InventoryDbContext _db;
+    private readonly IPublishEndpoint _publishEndpoint;
     private readonly ILogger<OutboxDispatcher> _logger;
     private readonly OutboxOptions _options;
 
     public OutboxDispatcher(
-        OrderDbContext db,
-        IEventPublisher publisher,
+        InventoryDbContext db,
+        IPublishEndpoint publishEndpoint,
         ILogger<OutboxDispatcher> logger,
         IOptions<OutboxOptions> options)
     {
         _db = db;
-        _publisher = publisher;
+        _publishEndpoint = publishEndpoint;
         _logger = logger;
         _options = options.Value;
     }
@@ -96,7 +76,11 @@ public sealed class OutboxDispatcher : IOutboxDispatcher
         }
     }
 
-    private Task<List<Application.Outbox.OutboxMessage>> ClaimPendingRowsAsync(CancellationToken cancellationToken)
+    // FOR UPDATE SKIP LOCKED: lets multiple replicas of this service poll
+    // concurrently without duplicating work — see the OrderService
+    // dispatcher's comments for the full explanation. Postgres-only; the
+    // plain LINQ query below is what test doubles (SQLite/InMemory) use.
+    private Task<List<OutboxMessage>> ClaimPendingRowsAsync(CancellationToken cancellationToken)
     {
         var now = DateTime.UtcNow;
 
@@ -112,7 +96,7 @@ public sealed class OutboxDispatcher : IOutboxDispatcher
             .ToListAsync(cancellationToken);
     }
 
-    private Task<List<Application.Outbox.OutboxMessage>> SelectPendingRowsAsync(CancellationToken cancellationToken)
+    private Task<List<OutboxMessage>> SelectPendingRowsAsync(CancellationToken cancellationToken)
     {
         var now = DateTime.UtcNow;
 
@@ -125,7 +109,7 @@ public sealed class OutboxDispatcher : IOutboxDispatcher
             .ToListAsync(cancellationToken);
     }
 
-    private async Task DispatchOneAsync(Application.Outbox.OutboxMessage message, CancellationToken cancellationToken)
+    private async Task DispatchOneAsync(OutboxMessage message, CancellationToken cancellationToken)
     {
         try
         {
@@ -134,26 +118,19 @@ public sealed class OutboxDispatcher : IOutboxDispatcher
             var payload = JsonSerializer.Deserialize(message.Content, type)
                 ?? throw new InvalidOperationException("Outbox payload deserialized to null.");
 
-            await _publisher.PublishAsync(payload, type, cancellationToken);
+            await _publishEndpoint.Publish(payload, type, cancellationToken);
             message.MarkProcessed(DateTime.UtcNow);
 
             _logger.LogInformation("Outbox: dispatched {Type} ({Id})", type.Name, message.Id);
         }
         catch (Exception ex)
         {
-            // Never let one poison message take down the batch — record
-            // the failure and let the next poll retry it.
             message.MarkFailed(ex.Message);
 
             if (message.RetryCount >= _options.MaxRetries)
             {
-                // This row just became invisible to the next poll's query
-                // (RetryCount is no longer < MaxRetries) — Error-level,
-                // because unlike a normal retry this needs a human, the
-                // outbox's equivalent of a message landing in RabbitMQ's
-                // `_error` queue. See GET /diagnostics/outbox/dead-letters.
                 _logger.LogError(ex,
-                    "Outbox: message {Id} ({Type}) abandoned after {RetryCount} attempts — see /diagnostics/outbox/dead-letters",
+                    "Outbox: message {Id} ({Type}) abandoned after {RetryCount} attempts",
                     message.Id, message.Type, message.RetryCount);
             }
             else

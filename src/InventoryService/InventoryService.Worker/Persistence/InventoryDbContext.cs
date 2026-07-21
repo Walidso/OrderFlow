@@ -1,4 +1,5 @@
 using InventoryService.Worker.Idempotency;
+using InventoryService.Worker.Outbox;
 using InventoryService.Worker.Stock;
 using Microsoft.EntityFrameworkCore;
 
@@ -17,6 +18,7 @@ public class InventoryDbContext : DbContext
 
     public DbSet<StockItem> StockItems => Set<StockItem>();
     public DbSet<ProcessedOrder> ProcessedOrders => Set<ProcessedOrder>();
+    public DbSet<OutboxMessage> OutboxMessages => Set<OutboxMessage>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

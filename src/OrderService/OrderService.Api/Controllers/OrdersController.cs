@@ -3,6 +3,7 @@ using Asp.Versioning;
 using MediatR;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using OrderService.Api.Contracts;
 using OrderService.Application.Orders.Commands.CreateOrder;
 using OrderService.Application.Orders.Dtos;
@@ -34,6 +35,7 @@ public sealed class OrdersController : ControllerBase
 
     /// <summary>Create an order. Saved as Pending, then Inventory decides its fate.</summary>
     [HttpPost]
+    [EnableRateLimiting("orders")] // see Program.cs — partitioned per user, not per IP
     [ProducesResponseType(StatusCodes.Status201Created)]
     [ProducesResponseType(typeof(ValidationProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]

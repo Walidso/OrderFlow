@@ -2,6 +2,7 @@ using Asp.Versioning;
 using MediatR;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using OrderService.Api.Contracts;
 using OrderService.Application.Auth;
 using OrderService.Application.Auth.Commands.Login;
@@ -19,6 +20,7 @@ namespace OrderService.Api.Controllers;
 [ApiVersion("1.0")]
 [Route("api/v{version:apiVersion}/auth")]
 [AllowAnonymous] // by definition you're not logged in yet on these endpoints
+[EnableRateLimiting("auth")] // brute-force guard on both register and login — see Program.cs
 public sealed class AuthController : ControllerBase
 {
     private readonly ISender _sender;

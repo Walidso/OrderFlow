@@ -28,6 +28,15 @@ public class OutboxMessage
     public int RetryCount { get; private set; }
     public string? Error { get; private set; }
 
+    /// <summary>
+    /// Earliest the dispatcher should try this row again. Null means "try on
+    /// the very next poll" — the state a fresh row starts in, and also what
+    /// a successful dispatch doesn't need to touch. Set by MarkFailed with
+    /// an exponential backoff, so a broker outage doesn't get hammered every
+    /// single poll tick for the row's whole retry budget.
+    /// </summary>
+    public DateTime? NextAttemptUtc { get; private set; }
+
     private OutboxMessage() { } // for EF Core only
 
     public static OutboxMessage Create(string type, string content, DateTime occurredOnUtc) => new()
@@ -49,10 +58,17 @@ public class OutboxMessage
     /// unprocessed so the next poll retries it. RetryCount lets the
     /// dispatcher eventually give up on a poison message instead of
     /// hammering a broker/payload that will never succeed.
+    ///
+    /// Exponential backoff (capped at 60s), same increasing-gaps idea as the
+    /// RabbitMQ consumer's 1s/5s/15s retry ladder: a transient blip gets
+    /// retried almost immediately, but a broker that's genuinely down for a
+    /// while doesn't get hammered every single poll tick.
     /// </summary>
     public void MarkFailed(string error)
     {
         RetryCount++;
         Error = error;
+        var delaySeconds = Math.Min(60, Math.Pow(2, RetryCount));
+        NextAttemptUtc = DateTime.UtcNow.AddSeconds(delaySeconds);
     }
 }

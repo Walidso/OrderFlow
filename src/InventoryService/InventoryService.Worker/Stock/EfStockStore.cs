@@ -28,7 +28,23 @@ namespace InventoryService.Worker.Stock;
 /// reservation ALL-OR-NOTHING: the moment any line's UPDATE affects zero
 /// rows, we roll back — undoing any earlier lines this same attempt already
 /// decremented — instead of leaving a half-reserved order.
-/// ============================================================================
+///
+/// ===================== DEADLOCK PREVENTION (lines sorted) ==================
+/// Two orders reserving the SAME products in different sequences — Order A:
+/// APPLE-1 then MANGO-1; Order B: MANGO-1 then APPLE-1, running concurrently
+/// — is the textbook circular-wait deadlock: A holds APPLE-1's row lock and
+/// waits for MANGO-1 (held by B), while B holds MANGO-1's lock and waits for
+/// APPLE-1 (held by A). Sorting every reservation's lines into the SAME
+/// canonical order (by ProductId) before acquiring any locks makes that
+/// cycle impossible — every caller always asks for row locks in the same
+/// order, so there's nothing left to wait on circularly.
+///
+/// ================== AMBIENT TRANSACTION PARTICIPATION ======================
+/// This method can run two ways: standalone (owns and commits/rolls back its
+/// own transaction — what every existing test does), or nested inside a
+/// transaction the CALLER already opened (what StockReservationCoordinator
+/// does, so the stock update, the idempotency marker, and the outbox row
+/// enqueueing the outbound event all commit — or roll back — together).
 /// </summary>
 public sealed class EfStockStore : IStockStore
 {
@@ -39,26 +55,42 @@ public sealed class EfStockStore : IStockStore
     public async Task<StockReservationResult> TryReserveAsync(
         IReadOnlyList<OrderLine> lines, CancellationToken cancellationToken = default)
     {
-        await using var transaction = await _db.Database.BeginTransactionAsync(cancellationToken);
+        var orderedLines = lines.OrderBy(l => l.ProductId).ToList();
 
-        foreach (var line in lines)
+        var ownsTransaction = _db.Database.CurrentTransaction is null;
+        var transaction = ownsTransaction
+            ? await _db.Database.BeginTransactionAsync(cancellationToken)
+            : null;
+
+        try
         {
-            var rowsAffected = await _db.StockItems
-                .Where(s => s.ProductId == line.ProductId && s.AvailableQuantity >= line.Quantity)
-                .ExecuteUpdateAsync(
-                    setters => setters.SetProperty(
-                        s => s.AvailableQuantity, s => s.AvailableQuantity - line.Quantity),
-                    cancellationToken);
-
-            if (rowsAffected == 0)
+            foreach (var line in orderedLines)
             {
-                await transaction.RollbackAsync(cancellationToken);
-                return await BuildRejectionAsync(line, cancellationToken);
-            }
-        }
+                var rowsAffected = await _db.StockItems
+                    .Where(s => s.ProductId == line.ProductId && s.AvailableQuantity >= line.Quantity)
+                    .ExecuteUpdateAsync(
+                        setters => setters.SetProperty(
+                            s => s.AvailableQuantity, s => s.AvailableQuantity - line.Quantity),
+                        cancellationToken);
 
-        await transaction.CommitAsync(cancellationToken);
-        return StockReservationResult.Reserved();
+                if (rowsAffected == 0)
+                {
+                    // Only roll back if we own the transaction. If we're
+                    // nested inside the caller's, the caller decides what
+                    // to do with a failed reservation (e.g. still commit
+                    // the outbox row that records the rejection).
+                    if (ownsTransaction) await transaction!.RollbackAsync(cancellationToken);
+                    return await BuildRejectionAsync(line, cancellationToken);
+                }
+            }
+
+            if (ownsTransaction) await transaction!.CommitAsync(cancellationToken);
+            return StockReservationResult.Reserved();
+        }
+        finally
+        {
+            if (transaction is not null) await transaction.DisposeAsync();
+        }
     }
 
     private async Task<StockReservationResult> BuildRejectionAsync(

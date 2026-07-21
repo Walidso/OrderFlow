@@ -1,12 +1,17 @@
+using System.Security.Claims;
 using System.Text;
+using System.Threading.RateLimiting;
 using Asp.Versioning;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
 using OrderService.Api.Middleware;
 using OrderService.Application;
 using OrderService.Infrastructure;
+using OrderService.Infrastructure.Outbox;
 using OrderService.Infrastructure.Persistence;
 
 // ============================================================================
@@ -120,10 +125,51 @@ builder.Services
     });
 builder.Services.AddAuthorization();
 
-// ---- Health checks: /health returns Unhealthy if the DB is unreachable ----
-// docker-compose and orchestrators use this to know when we're actually up.
+// ---- Health checks: /health returns Unhealthy if the DB OR the broker is
+// unreachable ---- docker-compose and orchestrators use this to know when
+// we're actually up. Without the RabbitMQ check, this service could report
+// Healthy while every message it publishes silently fails.
+var rabbitMqUri = new Uri(
+    $"amqp://{builder.Configuration["RabbitMq:Username"] ?? "guest"}:" +
+    $"{builder.Configuration["RabbitMq:Password"] ?? "guest"}@" +
+    $"{builder.Configuration["RabbitMq:Host"] ?? "localhost"}:5672");
+
 builder.Services.AddHealthChecks()
-    .AddDbContextCheck<OrderDbContext>();
+    .AddDbContextCheck<OrderDbContext>()
+    .AddRabbitMQ(rabbitConnectionString: rabbitMqUri.ToString());
+
+// ---- Rate limiting: brute-force / DoS protection on the endpoints most
+// worth abusing. Partitioned per caller (not one global counter) — a
+// single attacker maxing out their own limit shouldn't lock out everyone
+// else hitting the same endpoint. ----
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+
+    // Register + login are unauthenticated by definition, so the only
+    // identity available to partition on is the caller's IP.
+    options.AddPolicy("auth", httpContext => RateLimitPartition.GetFixedWindowLimiter(
+        partitionKey: httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+        factory: _ => new FixedWindowRateLimiterOptions
+        {
+            Window = TimeSpan.FromMinutes(1),
+            PermitLimit = 5,
+            QueueLimit = 0
+        }));
+
+    // Order creation is authenticated, so partition on the JWT's user id
+    // rather than IP — matches how the rest of the app treats the token as
+    // the caller's real identity (see OrdersController.CurrentUserId).
+    options.AddPolicy("orders", httpContext => RateLimitPartition.GetFixedWindowLimiter(
+        partitionKey: httpContext.User.FindFirstValue(ClaimTypes.NameIdentifier)
+            ?? httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+        factory: _ => new FixedWindowRateLimiterOptions
+        {
+            Window = TimeSpan.FromSeconds(10),
+            PermitLimit = 20,
+            QueueLimit = 0
+        }));
+});
 
 var app = builder.Build();
 
@@ -142,9 +188,27 @@ app.UseCors("WebUi");
 
 app.UseAuthentication();
 app.UseAuthorization();
+app.UseRateLimiter();
 
 app.MapControllers();
 app.MapHealthChecks("/health");
+
+// ---- Diagnostics: outbox rows the dispatcher has given up on ----
+// "Never silently drop a failed message" is already the rule for consumer
+// poison messages (RabbitMQ's `_error` queue) — this is the same rule
+// applied to the outbox side. Once a row's RetryCount reaches MaxRetries,
+// OutboxDispatcher stops picking it up; this is where a human finds it
+// instead of it just sitting invisibly in the table.
+app.MapGet("/diagnostics/outbox/dead-letters", async (OrderDbContext db, IOptions<OutboxOptions> outboxOptions) =>
+{
+    var deadLetters = await db.OutboxMessages
+        .Where(m => m.ProcessedOnUtc == null && m.RetryCount >= outboxOptions.Value.MaxRetries)
+        .OrderBy(m => m.OccurredOnUtc)
+        .Select(m => new { m.Id, m.Type, m.OccurredOnUtc, m.RetryCount, m.Error })
+        .ToListAsync();
+
+    return Results.Ok(deadLetters);
+});
 
 // ---- Apply EF Core migrations on startup ----
 // For a local/demo system this is the pragmatic choice: `docker compose up`

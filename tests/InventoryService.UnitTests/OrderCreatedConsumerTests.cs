@@ -1,5 +1,6 @@
 using InventoryService.Worker.Consumers;
 using InventoryService.Worker.Idempotency;
+using InventoryService.Worker.Reservations;
 using InventoryService.Worker.Stock;
 using MassTransit;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -14,9 +15,13 @@ namespace InventoryService.UnitTests;
 /// interface) instead of standing up a real or in-memory bus — the fastest,
 /// least flaky way to unit test what a single Consume() call does, matching
 /// how OrderService.UnitTests calls handlers directly rather than going
-/// through MediatR. IStockStore/IProcessedOrderStore are mocked here too;
-/// EfStockStoreTests/EfProcessedOrderStoreTests cover the real, persisted
-/// implementations separately.
+/// through MediatR.
+///
+/// IStockReservationCoordinator is mocked here — this consumer's whole job
+/// is "check idempotency, then delegate to the coordinator", so that's what
+/// gets tested. The coordinator's own atomicity guarantees (stock + marker +
+/// outbox row, one transaction) are covered separately in
+/// StockReservationCoordinatorTests, against the real EF implementation.
 /// </summary>
 public class OrderCreatedConsumerTests
 {
@@ -27,108 +32,75 @@ public class OrderCreatedConsumerTests
         return context;
     }
 
-    private static IStockStore StockThatAlwaysReserves()
+    private static IStockReservationCoordinator CoordinatorThatAlwaysReserves()
     {
-        var stock = Substitute.For<IStockStore>();
-        stock.TryReserveAsync(Arg.Any<IReadOnlyList<OrderLine>>(), Arg.Any<CancellationToken>())
+        var coordinator = Substitute.For<IStockReservationCoordinator>();
+        coordinator.ReserveAsync(Arg.Any<Guid>(), Arg.Any<IReadOnlyList<OrderLine>>(), Arg.Any<CancellationToken>())
             .Returns(Task.FromResult(StockReservationResult.Reserved()));
-        return stock;
+        return coordinator;
     }
 
     [Fact]
-    public async Task Consume_StockAvailable_PublishesStockReserved()
+    public async Task Consume_NewOrder_DelegatesToCoordinator()
     {
+        var coordinator = CoordinatorThatAlwaysReserves();
         var consumer = new OrderCreatedConsumer(
-            StockThatAlwaysReserves(), new InMemoryProcessedOrderStore(), NullLogger<OrderCreatedConsumer>.Instance);
+            new InMemoryProcessedOrderStore(), coordinator, NullLogger<OrderCreatedConsumer>.Instance);
 
         var orderId = Guid.NewGuid();
-        var context = CreateContext(new OrderCreated(orderId, Guid.NewGuid(),
-            new List<OrderLine> { new("APPLE-1", 2) }, DateTime.UtcNow));
+        var lines = new List<OrderLine> { new("APPLE-1", 2) };
+        var context = CreateContext(new OrderCreated(orderId, Guid.NewGuid(), lines, DateTime.UtcNow));
 
         await consumer.Consume(context);
 
-        await context.Received(1).Publish(
-            Arg.Is<StockReserved>(e => e.OrderId == orderId), Arg.Any<CancellationToken>());
+        await coordinator.Received(1).ReserveAsync(orderId, lines, Arg.Any<CancellationToken>());
     }
 
     [Fact]
-    public async Task Consume_StockUnavailable_PublishesStockRejected()
+    public async Task Consume_PoisonProduct_ThrowsWithoutCallingCoordinatorOrMarkingProcessed()
     {
-        var stock = Substitute.For<IStockStore>();
-        stock.TryReserveAsync(Arg.Any<IReadOnlyList<OrderLine>>(), Arg.Any<CancellationToken>())
-            .Returns(Task.FromResult(StockReservationResult.Rejected("Insufficient stock for 'MANGO-1'.")));
-
-        var consumer = new OrderCreatedConsumer(
-            stock, new InMemoryProcessedOrderStore(), NullLogger<OrderCreatedConsumer>.Instance);
+        // A throw means MassTransit will redeliver the SAME attempt per the
+        // retry ladder in Program.cs — so this must not touch the
+        // coordinator (no partial reservation) or the idempotency store (a
+        // marked-processed order would make the retry silently no-op
+        // instead of actually retrying).
+        var coordinator = CoordinatorThatAlwaysReserves();
+        var processed = new InMemoryProcessedOrderStore();
+        var consumer = new OrderCreatedConsumer(processed, coordinator, NullLogger<OrderCreatedConsumer>.Instance);
 
         var orderId = Guid.NewGuid();
         var context = CreateContext(new OrderCreated(orderId, Guid.NewGuid(),
-            new List<OrderLine> { new("MANGO-1", 10) }, DateTime.UtcNow));
-
-        await consumer.Consume(context);
-
-        await context.Received(1).Publish(
-            Arg.Is<StockRejected>(e => e.OrderId == orderId && e.Reason.Contains("MANGO-1")),
-            Arg.Any<CancellationToken>());
-    }
-
-    [Fact]
-    public async Task Consume_PoisonProduct_ThrowsWithoutTouchingStockOrPublishing()
-    {
-        var stock = StockThatAlwaysReserves();
-        var consumer = new OrderCreatedConsumer(
-            stock, new InMemoryProcessedOrderStore(), NullLogger<OrderCreatedConsumer>.Instance);
-
-        var context = CreateContext(new OrderCreated(Guid.NewGuid(), Guid.NewGuid(),
             new List<OrderLine> { new("DURIAN-1", 1) }, DateTime.UtcNow));
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => consumer.Consume(context));
 
-        await stock.DidNotReceive().TryReserveAsync(
-            Arg.Any<IReadOnlyList<OrderLine>>(), Arg.Any<CancellationToken>());
+        await coordinator.DidNotReceive().ReserveAsync(
+            Arg.Any<Guid>(), Arg.Any<IReadOnlyList<OrderLine>>(), Arg.Any<CancellationToken>());
+        Assert.False(await processed.HasBeenProcessedAsync(orderId));
     }
 
     [Fact]
-    public async Task Consume_DuplicateDeliveryOfSameOrder_DoesNotReserveOrPublishTwice()
+    public async Task Consume_DuplicateDeliveryOfSameOrder_CallsCoordinatorOnlyOnce()
     {
         // Simulates the exact scenario the outbox relay can cause: it
-        // republishes OrderCreated as a brand-new message (new MessageId)
-        // if it crashes after a successful publish but before marking its
-        // row processed. Same OrderId, different message.
-        var stock = StockThatAlwaysReserves();
+        // republishes OrderCreated as a brand-new message if it crashes
+        // after enqueueing the outcome but before... actually it can't
+        // anymore — StockReservationCoordinator marks the order processed
+        // in the SAME transaction as the outbox row. This test still
+        // matters: redelivery (e.g. a network blip re-acking) must not
+        // call the coordinator twice regardless of why it happened.
+        var coordinator = CoordinatorThatAlwaysReserves();
         var processed = new InMemoryProcessedOrderStore();
-        var consumer = new OrderCreatedConsumer(stock, processed, NullLogger<OrderCreatedConsumer>.Instance);
+        var consumer = new OrderCreatedConsumer(processed, coordinator, NullLogger<OrderCreatedConsumer>.Instance);
 
         var orderId = Guid.NewGuid();
         var lines = new List<OrderLine> { new("APPLE-1", 2) };
 
         await consumer.Consume(CreateContext(new OrderCreated(orderId, Guid.NewGuid(), lines, DateTime.UtcNow)));
+        await processed.MarkProcessedAsync(orderId); // what the coordinator would have done for real
+        await consumer.Consume(CreateContext(new OrderCreated(orderId, Guid.NewGuid(), lines, DateTime.UtcNow)));
 
-        var redeliveryContext = CreateContext(new OrderCreated(orderId, Guid.NewGuid(), lines, DateTime.UtcNow));
-        await consumer.Consume(redeliveryContext);
-
-        await stock.Received(1).TryReserveAsync(Arg.Any<IReadOnlyList<OrderLine>>(), Arg.Any<CancellationToken>());
-        await redeliveryContext.DidNotReceive().Publish(
-            Arg.Any<StockReserved>(), Arg.Any<CancellationToken>());
-    }
-
-    [Fact]
-    public async Task Consume_ThrownException_DoesNotMarkOrderProcessed()
-    {
-        // A throw means MassTransit will redeliver the SAME attempt per the
-        // retry ladder in Program.cs. If we marked the order processed
-        // before succeeding, that retry would silently no-op instead of
-        // actually retrying — breaking the retry/error-queue demo.
-        var stock = StockThatAlwaysReserves();
-        var processed = new InMemoryProcessedOrderStore();
-        var consumer = new OrderCreatedConsumer(stock, processed, NullLogger<OrderCreatedConsumer>.Instance);
-
-        var orderId = Guid.NewGuid();
-        var context = CreateContext(new OrderCreated(orderId, Guid.NewGuid(),
-            new List<OrderLine> { new("DURIAN-1", 1) }, DateTime.UtcNow));
-
-        await Assert.ThrowsAsync<InvalidOperationException>(() => consumer.Consume(context));
-
-        Assert.False(await processed.HasBeenProcessedAsync(orderId));
+        await coordinator.Received(1).ReserveAsync(
+            Arg.Any<Guid>(), Arg.Any<IReadOnlyList<OrderLine>>(), Arg.Any<CancellationToken>());
     }
 }

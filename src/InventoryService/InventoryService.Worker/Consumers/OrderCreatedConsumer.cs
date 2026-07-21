@@ -1,5 +1,5 @@
 using InventoryService.Worker.Idempotency;
-using InventoryService.Worker.Stock;
+using InventoryService.Worker.Reservations;
 using MassTransit;
 using OrderFlow.Contracts;
 
@@ -43,24 +43,29 @@ namespace InventoryService.Worker.Consumers;
 /// through. Without a guard, a duplicate OrderCreated would call
 /// TryReserve() twice and double-decrement stock for one order.
 ///
-/// _processedOrders is checked FIRST (skip work already done) and marked
-/// LAST, only after the outcome (StockReserved/StockRejected) is published
-/// (only decide once). Marking it any earlier would break the retry demo
-/// below: a thrown exception must be free to actually retry the real work,
-/// not silently no-op on attempt two.
+/// _processedOrders.HasBeenProcessedAsync is checked FIRST so already-decided
+/// orders skip straight past — that write itself now happens INSIDE
+/// StockReservationCoordinator, atomically with the stock change and the
+/// outbox row that will eventually publish the outcome (see its comments
+/// for why "reserve, then publish, then mark processed" as three separate
+/// steps used to leave a real gap). This consumer no longer publishes
+/// anything directly — that's the outbox dispatcher's job now, exactly like
+/// CreateOrderCommandHandler on the Order Service side.
 /// ============================================================================
 /// </summary>
 public sealed class OrderCreatedConsumer : IConsumer<OrderCreated>
 {
-    private readonly IStockStore _stock;
     private readonly IProcessedOrderStore _processedOrders;
+    private readonly IStockReservationCoordinator _coordinator;
     private readonly ILogger<OrderCreatedConsumer> _logger;
 
     public OrderCreatedConsumer(
-        IStockStore stock, IProcessedOrderStore processedOrders, ILogger<OrderCreatedConsumer> logger)
+        IProcessedOrderStore processedOrders,
+        IStockReservationCoordinator coordinator,
+        ILogger<OrderCreatedConsumer> logger)
     {
-        _stock = stock;
         _processedOrders = processedOrders;
+        _coordinator = coordinator;
         _logger = logger;
     }
 
@@ -91,28 +96,12 @@ public sealed class OrderCreatedConsumer : IConsumer<OrderCreated>
         }
         // --------------------------------------------------------------------
 
-        var result = await _stock.TryReserveAsync(message.Lines, cancellationToken);
+        var result = await _coordinator.ReserveAsync(message.OrderId, message.Lines, cancellationToken);
 
-        if (result.Success)
-        {
-            // context.Publish (instead of a raw IPublishEndpoint) ties the
-            // outgoing event to the incoming message's conversation, so
-            // correlation ids flow through — great for tracing.
-            await context.Publish(new StockReserved(message.OrderId));
-            _logger.LogInformation("Stock reserved for order {OrderId}", message.OrderId);
-        }
-        else
-        {
-            // Business failure != technical failure. Out-of-stock is a VALID
-            // outcome, so we publish StockRejected and complete the message.
-            // Throwing here would retry forever for something retries can't
-            // fix. (Interview one-liner: "retry transient faults, never
-            // business outcomes.")
-            await context.Publish(new StockRejected(message.OrderId, result.FailureReason));
-            _logger.LogInformation(
-                "Stock rejected for order {OrderId}: {Reason}", message.OrderId, result.FailureReason);
-        }
-
-        await _processedOrders.MarkProcessedAsync(message.OrderId, cancellationToken);
+        _logger.LogInformation(
+            result.Success
+                ? "Stock reserved for order {OrderId}"
+                : "Stock rejected for order {OrderId}: {Reason}",
+            message.OrderId, result.FailureReason);
     }
 }

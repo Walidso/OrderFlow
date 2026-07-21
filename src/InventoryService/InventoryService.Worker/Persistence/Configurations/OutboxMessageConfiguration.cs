@@ -1,8 +1,8 @@
+using InventoryService.Worker.Outbox;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
-using OrderService.Application.Outbox;
 
-namespace OrderService.Infrastructure.Persistence.Configurations;
+namespace InventoryService.Worker.Persistence.Configurations;
 
 public sealed class OutboxMessageConfiguration : IEntityTypeConfiguration<OutboxMessage>
 {

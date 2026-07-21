@@ -122,4 +122,31 @@ public class OutboxDispatcherTests
         Assert.Equal(1, message.RetryCount);
         Assert.Null(message.ProcessedOnUtc); // still sitting there for a human to inspect, not silently dropped
     }
+
+    [Fact]
+    public async Task DispatchPendingAsync_FailedMessageBeforeItsBackoffWindow_IsNotRetriedYet()
+    {
+        // A broker outage shouldn't be hammered every single poll tick for
+        // the row's whole retry budget — MarkFailed sets an exponential
+        // backoff (see OutboxMessage), and the dispatcher's query must
+        // respect it.
+        await using var db = TestDbContextFactory.Create();
+        var writer = new EfOutboxWriter(db);
+        writer.Enqueue(new OrderCreated(Guid.NewGuid(), Guid.NewGuid(),
+            new List<OrderLine> { new("APPLE-1", 1) }, DateTime.UtcNow));
+        await db.SaveChangesAsync();
+
+        var publisher = Substitute.For<IEventPublisher>();
+        publisher.PublishAsync(Arg.Any<object>(), Arg.Any<Type>(), Arg.Any<CancellationToken>())
+            .Returns(Task.FromException(new InvalidOperationException("broker unreachable")));
+        var sut = CreateSut(db, publisher);
+
+        await sut.DispatchPendingAsync(); // fails once, NextAttemptUtc pushed a few seconds out
+        var immediateRetry = await sut.DispatchPendingAsync(); // polling again right away
+
+        Assert.Equal(0, immediateRetry); // too soon — still inside the backoff window
+        var message = await db.OutboxMessages.SingleAsync();
+        Assert.NotNull(message.NextAttemptUtc);
+        Assert.True(message.NextAttemptUtc > DateTime.UtcNow);
+    }
 }
